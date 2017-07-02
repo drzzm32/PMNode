@@ -2,43 +2,69 @@
 #include <Ethernet.h>
 
 byte mac[] = {
-  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
+  0x32, 0x32, 0x32, 0x32, 0x32, 0x32
 };
 IPAddress ip(192, 168, 1, 128);
-EthernetServer server(80);
+IPAddress dnsIp(192, 168, 1, 1);
+IPAddress gateIp(192, 168, 1, 1);
+IPAddress maskIp(255, 255, 255, 0);
+
+EthernetClient client;
+char server[] = "nya.ac.cn";
+//IPAddress server(139, 199, 82, 84);
+unsigned long lastConnectionTime = 0;
+const unsigned long postingInterval = 10L * 1000L;
 
 #include <SPFD5408_Adafruit_GFX.h>
 #include <SPFD5408_Adafruit_TFTLCD.h>
-#define LCD_CS A3
-#define LCD_CD A2
-#define LCD_WR A1
-#define LCD_RD A0
-#define LCD_RESET A4
-Adafruit_TFTLCD tft(LCD_CS, LCD_CD, LCD_WR, LCD_RD, LCD_RESET);
+Adafruit_TFTLCD tft(A3, A2, A1, A0, A4);
+#define BLACK   0x0000
+#define WHITE   0xFFFF
+#include <stdarg.h>
+#define IOBUF 128
+int print(const char* format, ...) {
+    char* iobuf = malloc(sizeof(char) * IOBUF);
+    va_list args;
+    va_start(args, format);
+    int result = vsprintf(iobuf, format, args);
+    va_end(args);
+    if (tft.getCursorY() >= tft.height()) {
+        tft.setCursor(0, 0);
+        tft.fillScreen(BLACK);
+    }
+    tft.print(iobuf);
+    free(iobuf);
+    return result;
+}
 
 static uint8_t dataBuf[10];
 static short pm25, pm10;
 
 void setup() {
-    Serial.begin(9600);
-    Serial1.begin(9600);
-
-    Serial.println("Initialize TFT");
     tft.reset();
     tft.begin(0x9341);
     tft.setRotation(2);
-    tft.fillScreen(0xFFFF);
+    tft.fillScreen(BLACK);
+    tft.setTextColor(WHITE);
+    tft.setTextSize(1);
     tft.setCursor(0, 0);
-    tft.setTextColor(0x0000, 0xFFFF); tft.setTextSize(3);
+    tft.println("[INFO]");
+    tft.println("[INFO] SCREEN OK!");
 
-    Serial.println("Initialize ETH");
-    Ethernet.begin(mac, ip);
-    server.begin();
-    Serial.print("Server is at ");
-    Serial.println(Ethernet.localIP());
+    tft.println("[INIT] Serial initializing...");
+    Serial1.begin(9600);
 
-    Serial.println("Initialize finished");
-    delay(1000);
+    tft.println("[INIT] Ethernet initializing...");
+    delay(3000);
+    if (Ethernet.begin(mac, 10000) == 0) {
+        tft.println("[ERROR] DHCP failed");
+        tft.println("[INFO] Using default IP");
+        Ethernet.begin(mac, ip, dnsIp, gateIp, maskIp);
+    }
+    tft.print("[INFO] The IP is: ");
+    tft.println(Ethernet.localIP());
+
+    tft.println("[INFO] BEGIN SENDING");
 }
 
 bool checkPacket() {
@@ -61,70 +87,45 @@ void doUpdate() {
         pm25 = (dataBuf[3] * 256 + dataBuf[2]) / 10;
         pm10 = (dataBuf[5] * 256 + dataBuf[4]) / 10;
     }
+    
+    print("[INFO] PM2.5: ");
+    print("%d\n", pm25);
+    tft.print("[INFO] PM10: ");
+    print("%d\n", pm10);
+}
 
-    tft.setCursor(16, 32);
-    tft.print("PM2.5: ");
-    tft.setCursor(128, 32);
-    if (pm25 >= 1000) tft.print(" ");
-    tft.print(pm25);
-    tft.setCursor(16, 64);
-    tft.print("PM10: ");
-    tft.setCursor(128, 64);
-    if (pm10 >= 1000) tft.print(" ");
-    tft.print(pm10);
+void httpRequest() {
+    client.stop();
+
+    if (client.connect(server, 5000)) {
+        print("[INFO] Connecting...\n");
+        
+        client.print("GET /api/set");
+        client.print("~id=arduino");
+        client.print("&time=2017-6-18T12:22");
+        client.print("&pm25=");
+        client.print(pm25);
+        client.print("&pm10=");
+        client.print(pm10);
+        client.println(" HTTP/1.1");
+        client.println("Host: nya.ac.cn:5000");
+        client.println("User-Agent: arduino-ethernet");
+        client.println("Connection: close");
+        client.println();
+
+        lastConnectionTime = millis();
+
+        print("[INFO] Connection finished\n");
+    } else {
+        print("[INFO] Connection failed\n");
+    }
 }
 
 void loop() {
-    /*
-    Serial.print("Loop: ");
-    for (uint8_t i = 0; i < 10; i++) {
-        Serial.print(dataBuf[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-    */
-    
-    doUpdate();
-
-    EthernetClient client = server.available();
-    if (client) {
-        Serial.println("New client");
-        boolean currentLineIsBlank = true;
-        while (client.connected()) { 
-            if (client.available()) {
-                char c = client.read();
-                Serial.write(c);
-            
-                if (c == '\n' && currentLineIsBlank) {
-                    client.println("HTTP/1.1 200 OK");
-                    client.println("Content-Type: text/html");
-                    client.println("Connection: close");
-                    client.println("Refresh: 5");
-                    client.println();
-                    client.println("<!DOCTYPE HTML>");
-                    client.println("<html>");
-
-                    client.print("PM2.5: ");
-                    client.print(pm25);
-                    client.println("<br />");
-
-                    client.print("PM10: ");
-                    client.print(pm10);
-                    client.println("<br />");
-                    
-                    client.println("</html>");
-                    break;
-                }
-                if (c == '\n') {
-                    currentLineIsBlank = true;
-                } else if (c != '\r') {
-                    currentLineIsBlank = false;
-                }
-            }
-            doUpdate();
-        }
-        delay(1);
-        client.stop();
-        Serial.println("Client disconnected");
+    if (millis() - lastConnectionTime > postingInterval) {
+        print("[INFO] BEGIN HTTP REQUEST\n");
+        doUpdate();
+        httpRequest();
+        print("\n");
     }
 }
